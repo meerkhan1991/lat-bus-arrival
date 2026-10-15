@@ -8,6 +8,7 @@ import {
   BusLoad,
   BusDeckType,
   BusOperator,
+  BusFeature,
 } from '../types/bus';
 import { SINGAPORE_BUS_STOPS, POPULAR_BUS_ROUTES } from '../data/singaporeBusData';
 
@@ -120,24 +121,80 @@ export class LTABusService {
     const stop = SINGAPORE_BUS_STOPS.find((s) => s.BusStopCode === busStopCode);
     const nowMs = Date.now();
 
-    // If user has provided live backend URL and enabled backend mode:
-    if (LTA_API_CONFIG.useLiveBackend && LTA_API_CONFIG.backendUrl) {
-      try {
-        const response = await fetch(
-          `${LTA_API_CONFIG.backendUrl}/api/bus-arrival?BusStopCode=${busStopCode}`,
-          {
-            headers: {
-              ...(LTA_API_CONFIG.accountKey ? { 'AccountKey': LTA_API_CONFIG.accountKey } : {}),
-            },
-          }
-        );
-        if (response.ok) {
-          const data = await response.json();
-          return data;
+    // 1. Attempt to query our serverless endpoint /api/busarrival
+    try {
+      const response = await fetch(`/api/busarrival?BusStopCode=${encodeURIComponent(busStopCode)}`);
+      if (response.ok) {
+        const liveData = await response.json();
+        if (liveData && Array.isArray(liveData.Services) && liveData.Services.length > 0) {
+          const mappedServices: LTAArrivalService[] = liveData.Services.map((svc: any) => {
+            const formatNext = (rawNext: any): LTANextBus | undefined => {
+              if (!rawNext || !rawNext.EstimatedArrival) return undefined;
+              const arrivalMs = new Date(rawNext.EstimatedArrival).getTime();
+              const secondsLeft = isNaN(arrivalMs) ? 0 : Math.max(0, Math.round((arrivalMs - nowMs) / 1000));
+              const route = POPULAR_BUS_ROUTES[svc.ServiceNo];
+
+              return {
+                OriginCode: rawNext.OriginCode || '00000',
+                DestinationCode: rawNext.DestinationCode || '00000',
+                DestinationName: route ? route.DestinationName : `Interchange (${rawNext.DestinationCode || ''})`,
+                EstimatedArrival: rawNext.EstimatedArrival,
+                EstimatedArrivalSeconds: secondsLeft,
+                Latitude: rawNext.Latitude || (stop ? String(stop.Latitude) : '0'),
+                Longitude: rawNext.Longitude || (stop ? String(stop.Longitude) : '0'),
+                VisitNumber: String(rawNext.VisitNumber || '1'),
+                Load: (rawNext.Load as BusLoad) || 'SEA',
+                Feature: (rawNext.Feature as BusFeature) || 'WAB',
+                Type: (rawNext.Type as BusDeckType) || 'SD',
+                SpeedKmH: 25,
+                DistanceMeters: Math.max(50, Math.round(secondsLeft * 7.5)),
+                StopsAway: Math.max(0, Math.floor(secondsLeft / 120)),
+              };
+            };
+
+            const next1 = formatNext(svc.NextBus);
+            const fallbackNext1: LTANextBus = {
+              OriginCode: '00000',
+              DestinationCode: '00000',
+              DestinationName: 'Interchange',
+              EstimatedArrival: new Date(nowMs + 180000).toISOString(),
+              EstimatedArrivalSeconds: 180,
+              Latitude: stop ? String(stop.Latitude) : '0',
+              Longitude: stop ? String(stop.Longitude) : '0',
+              VisitNumber: '1',
+              Load: 'SEA',
+              Feature: 'WAB',
+              Type: 'SD',
+              SpeedKmH: 25,
+              DistanceMeters: 500,
+              StopsAway: 1,
+            };
+
+            return {
+              ServiceNo: svc.ServiceNo,
+              Operator: (svc.Operator as BusOperator) || 'SBST',
+              NextBus: next1 || fallbackNext1,
+              NextBus2: formatNext(svc.NextBus2),
+              NextBus3: formatNext(svc.NextBus3),
+            };
+          });
+
+          // Sort by nearest arrival
+          mappedServices.sort((a, b) => {
+            const diffTime = a.NextBus.EstimatedArrivalSeconds - b.NextBus.EstimatedArrivalSeconds;
+            if (Math.abs(diffTime) > 60) return diffTime;
+            return a.ServiceNo.localeCompare(b.ServiceNo, undefined, { numeric: true });
+          });
+
+          return {
+            BusStopCode: liveData.BusStopCode || busStopCode,
+            Services: mappedServices,
+            timestamp: new Date().toISOString(),
+          };
         }
-      } catch (err) {
-        console.warn('Backend fetch failed, falling back to LTA simulation engine:', err);
       }
+    } catch {
+      // Endpoint call fell through or serverless endpoint is offline, fallback to simulation engine below
     }
 
     // Default authentic simulation engine:

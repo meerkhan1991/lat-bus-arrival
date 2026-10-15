@@ -1,6 +1,16 @@
 import { BusStopData, BusRouteData } from '../types/bus';
 
 export const SINGAPORE_BUS_STOPS: BusStopData[] = [
+  // Marine Parade & East Coast (LTA Stop 83139)
+  {
+    BusStopCode: '83139',
+    RoadName: 'Marine Parade Rd',
+    Description: 'Opp Parkland Green',
+    Latitude: 1.30058,
+    Longitude: 103.90562,
+    Services: ['31', '36', '43', '48', '134', '196', '197'],
+    MrtInterchange: 'TE26 Marine Parade',
+  },
   // Orchard Corridor
   {
     BusStopCode: '09048',
